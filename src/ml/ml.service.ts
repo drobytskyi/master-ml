@@ -49,45 +49,6 @@ export class MlService {
     }
   }
 
-  // private async makeDecision(
-  //   data: any,
-  // ): Promise<{ scaleUp: boolean; scaleDown: boolean; resources: any }> {
-  //   console.log('🚀 ~ MlService ~ makeDecision-1');
-
-  //   const model = await this.loadModel();
-  //   const inputTensor = this.prepareInput(data);
-
-  //   console.log('🚀 ~ MlService ~ makeDecision');
-  //   const prediction = model.predict(inputTensor) as tf.Tensor;
-  //   const predictionData = prediction.dataSync();
-  //   const scaleUp = predictionData[0] > 0.5;
-  //   const scaleDown = predictionData[1] > 0.5;
-
-  //   tf.dispose([inputTensor, prediction]);
-  //   console.log('🚀 ~ MlService ~ makeDecision');
-  //   console.log('🚀 ~ MlService ~ scaleDown:', scaleDown);
-  //   console.log('🚀 ~ MlService ~ scaleUp:', scaleUp);
-
-  //   if (scaleUp) {
-  //     console.log('scale up');
-  //     return {
-  //       scaleUp: true,
-  //       scaleDown: false,
-  //       resources: { instanceType: 't2.large' },
-  //     };
-  //   } else if (scaleDown) {
-  //     console.log('scale down');
-  //     return {
-  //       scaleUp: false,
-  //       scaleDown: true,
-  //       resources: { instanceType: 't2.small' },
-  //     };
-  //   }
-  //   console.log('🚀 ~ MlService ~ makeDecision-2');
-
-  //   return { scaleUp: false, scaleDown: false, resources: null };
-  // }
-
   private async trainModel(data: any): Promise<void> {
     const { xs, ys } = this.prepareTrainingData(data);
 
