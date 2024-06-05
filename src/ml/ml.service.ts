@@ -1,141 +1,102 @@
-import { HttpService } from '@nestjs/axios';
 import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import * as tf from '@tensorflow/tfjs-node';
+import { createModel } from './ml.model';
+import { Metric, ResourceDecision } from './ml.types';
 
 @Injectable()
 export class MlService {
-  private readonly hubServerUrl: string;
-  private readonly instanceId: string;
+  private model: tf.LayersModel | null = null;
+  private trainingData: {
+    InstanceId: string;
+    Metrics: { CPUUtilization: Metric[]; MemoryUsage: Metric[] };
+  };
 
-  constructor(
-    private readonly httpService: HttpService,
-    private readonly configService: ConfigService,
-  ) {
-    this.hubServerUrl = this.configService.get<string>('HUB_SERVER_URL');
-    this.instanceId = this.configService.get<string>('INSTANCE_ID');
-  }
-
-  async analyzeDataAndDecide(data: any): Promise<any> {
-    // Train the model with the provided data
-    await this.trainModel(data);
-
-    const decision = await this.makeDecision(data);
-    console.log('🚀 ~ MlService ~ analyzeDataAndDecide ~ decision:', decision);
-
-    if (decision.scaleUp) {
-      return decision;
-      //   await lastValueFrom(
-      //     this.httpService.post(
-      //       `${this.hubServerUrl}/resource-management/scale-up`,
-      //       {
-      //         instanceId: this.instanceId,
-      //         resources: decision.resources,
-      //       },
-      //     ),
-      //   );
-    } else if (decision.scaleDown) {
-      return decision;
-
-      //   await lastValueFrom(
-      //     this.httpService.post(
-      //       `${this.hubServerUrl}/resource-management/scale-down`,
-      //       {
-      //         instanceId: this.instanceId,
-      //         resources: decision.resources,
-      //       },
-      //     ),
-      //   );
-    }
-  }
-
-  private async trainModel(data: any): Promise<void> {
+  async trainModel(data: {
+    InstanceId: string;
+    Metrics: { CPUUtilization: Metric[]; MemoryUsage: Metric[] };
+  }) {
+    this.trainingData = data;
+    this.model = await createModel();
     const { xs, ys } = this.prepareTrainingData(data);
-
-    const model = tf.sequential();
-    model.add(
-      tf.layers.dense({ units: 10, activation: 'relu', inputShape: [2] }),
-    );
-    model.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
-
-    model.compile({
-      optimizer: 'adam',
-      loss: 'categoricalCrossentropy',
-      metrics: ['accuracy'],
-    });
-
-    await model.fit(xs, ys, {
-      epochs: 2000,
-      callbacks: {
-        onEpochEnd: async (epoch, logs) => {
-          console.log(`Epoch ${epoch}: loss = ${logs.loss}`);
-        },
-      },
-    });
-
-    await model.save('file://./model');
+    await this.model.fit(xs, ys, { epochs: 2000 });
+    console.log('Model training complete');
   }
 
-  private async makeDecision(data: any): Promise<{
-    scaleUp: boolean;
-    scaleDown: boolean;
-    resources: any;
-    times: number[];
-  }> {
-    console.log('🚀 ~ MlService ~ makeDecision-1');
+  async predict(time: string): Promise<ResourceDecision> {
+    if (!this.model) throw new Error('Model not trained yet');
 
-    const model = await this.loadModel();
-    const inputTensor = this.prepareInput(data);
+    const { hour, minute } = this.parseTime(time);
+    const pastDataPoint = this.findClosestPastData(hour, minute);
 
-    console.log('🚀 ~ MlService ~ makeDecision');
-    const prediction = model.predict(inputTensor) as tf.Tensor;
+    const inputTensor = tf.tensor2d([
+      [pastDataPoint.CPUUtilization, pastDataPoint.MemoryUsage],
+    ]);
+    const prediction = this.model.predict(inputTensor) as tf.Tensor;
     const predictionData = prediction.dataSync();
-    const scaleUp = predictionData[0] > 0.5;
-    const scaleDown = predictionData[1] > 0.5;
-
     tf.dispose([inputTensor, prediction]);
-    console.log('🚀 ~ MlService ~ makeDecision');
-    console.log('🚀 ~ MlService ~ scaleDown:', scaleDown);
-    console.log('🚀 ~ MlService ~ scaleUp:', scaleUp);
 
-    const times = this.getHighUtilizationTimes(data);
+    const scaleUpThreshold = 0.7;
+    const scaleDownThreshold = 0.3;
 
-    if (scaleUp) {
-      console.log('scale up');
-      return {
-        scaleUp: true,
-        scaleDown: false,
-        resources: { instanceType: 't2.large' },
-        times,
-      };
-    } else if (scaleDown) {
-      console.log('scale down');
-      return {
-        scaleUp: false,
-        scaleDown: true,
-        resources: { instanceType: 't2.small' },
-        times,
-      };
+    let action: 'Scale Up' | 'Scale Down' | 'No Action' = 'No Action';
+    let reason;
+
+    if (predictionData[0] > scaleUpThreshold) {
+      action = 'Scale Up';
+      reason =
+        pastDataPoint.CPUUtilization > pastDataPoint.MemoryUsage
+          ? 'CPU almost 90%'
+          : 'Memory almost 90%';
+    } else if (predictionData[1] > scaleDownThreshold) {
+      action = 'Scale Down';
     }
-    console.log('🚀 ~ MlService ~ makeDecision-2');
 
-    return { scaleUp: false, scaleDown: false, resources: null, times };
+    return {
+      action,
+      resources:
+        action !== 'No Action'
+          ? { instanceType: action === 'Scale Up' ? 't2.large' : 't2.small' }
+          : undefined,
+      time,
+      reason,
+    };
   }
 
-  private getHighUtilizationTimes(data: any): number[] {
-    const cpuUtilization = data.Metrics.CPUUtilization;
-    const highUtilizationTimes = cpuUtilization
-      .filter((entry: any) => entry.Average > 70)
-      .map((entry: any) => entry.Timestamp);
-    return highUtilizationTimes;
+  private parseTime(timeStr: string) {
+    const [hourStr, minuteStr] = timeStr.split(':');
+    return { hour: parseInt(hourStr, 10), minute: parseInt(minuteStr, 10) };
   }
 
-  private prepareTrainingData(data: any) {
+  private findClosestPastData(hour: number, minute: number) {
+    const targetTimeMinutes = hour * 60 + minute;
+    let closestTimeDiff = Infinity;
+    let closestDataPoint = null;
+
+    for (let i = 0; i < this.trainingData.Metrics.CPUUtilization.length; i++) {
+      const entryTime = new Date(
+        this.trainingData.Metrics.CPUUtilization[i].Timestamp,
+      );
+      const entryTimeMinutes =
+        entryTime.getHours() * 60 + entryTime.getMinutes();
+      const timeDiff = Math.abs(targetTimeMinutes - entryTimeMinutes);
+
+      if (timeDiff < closestTimeDiff) {
+        closestTimeDiff = timeDiff;
+        closestDataPoint = {
+          CPUUtilization: this.trainingData.Metrics.CPUUtilization[i].Average,
+          MemoryUsage: this.trainingData.Metrics.MemoryUsage[i].Average,
+        };
+      }
+    }
+
+    return closestDataPoint;
+  }
+  private prepareTrainingData(data: any): { xs: tf.Tensor2D; ys: tf.Tensor2D } {
     const cpuUtilization = data.Metrics.CPUUtilization.map(
-      (entry: any) => entry.Average,
+      (entry: Metric) => entry.Average,
     );
     const memoryUsage = data.Metrics.MemoryUsage.map(
-      (entry: any) => entry.Average,
+      (entry: Metric) => entry.Average,
     );
 
     const xs = tf.tensor2d(
@@ -144,29 +105,20 @@ export class MlService {
         memoryUsage[index],
       ]),
     );
+
+    // Use a higher threshold for scaling up (e.g., 80%) and a lower one for scaling down (e.g., 20%)
     const ys = tf.tensor2d(
-      cpuUtilization.map((cpu: number) => (cpu > 70 ? [1, 0] : [0, 1])),
+      cpuUtilization.map((cpu: number, index: number) => {
+        if (cpu > 80 || memoryUsage[index] > 80) {
+          return [1, 0]; // Scale Up
+        } else if (cpu < 20 && memoryUsage[index] < 20) {
+          return [0, 1]; // Scale Down
+        } else {
+          return [0, 0]; // No Action (you may need to adjust your model to handle this)
+        }
+      }),
     );
 
     return { xs, ys };
-  }
-
-  private async loadModel(): Promise<tf.LayersModel> {
-    return await tf.loadLayersModel('file://./model/model.json');
-  }
-
-  private prepareInput(data: any): tf.Tensor {
-    const cpuAverage =
-      data.Metrics.CPUUtilization.reduce(
-        (sum: number, entry: any) => sum + entry.Average,
-        0,
-      ) / data.Metrics.CPUUtilization.length;
-    const memoryAverage =
-      data.Metrics.MemoryUsage.reduce(
-        (sum: number, entry: any) => sum + entry.Average,
-        0,
-      ) / data.Metrics.MemoryUsage.length;
-
-    return tf.tensor2d([[cpuAverage, memoryAverage]]);
   }
 }
